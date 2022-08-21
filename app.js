@@ -1,4 +1,4 @@
-const { Client, MessageMedia } = require('whatsapp-web.js');
+const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -8,6 +8,8 @@ const fs = require('fs');
 const { phoneNumberFormatter } = require('./helpers/formatter');
 const fileUpload = require('express-fileupload');
 const axios = require('axios');
+const mime = require('mime-types');
+
 const port = process.env.PORT || 8000;
 
 const app = express();
@@ -18,15 +20,17 @@ app.use(express.json());
 app.use(express.urlencoded({
   extended: true
 }));
-app.use(fileUpload({
-  debug: true
-}));
 
-const SESSION_FILE_PATH = './whatsapp-session.json';
-let sessionCfg;
-if (fs.existsSync(SESSION_FILE_PATH)) {
-  sessionCfg = require(SESSION_FILE_PATH);
-}
+/**
+ * BASED ON MANY QUESTIONS
+ * Actually ready mentioned on the tutorials
+ * 
+ * Many people confused about the warning for file-upload
+ * So, we just disabling the debug for simplicity.
+ */
+app.use(fileUpload({
+  debug: false
+}));
 
 app.get('/', (req, res) => {
   res.sendFile('index.html', {
@@ -49,7 +53,7 @@ const client = new Client({
       '--disable-gpu'
     ],
   },
-  session: sessionCfg
+  authStrategy: new LocalAuth()
 });
 
 const db = require('./helpers/db');
@@ -78,6 +82,37 @@ client.on('message', async msg => {
   }
 });
 
+
+  // NOTE!
+  // UNCOMMENT THE SCRIPT BELOW IF YOU WANT TO SAVE THE MESSAGE MEDIA FILES
+  // Downloading media
+  // if (msg.hasMedia) {
+  //   msg.downloadMedia().then(media => {
+  //     // To better understanding
+  //     // Please look at the console what data we get
+  //     console.log(media);
+
+  //     if (media) {
+  //       // The folder to store: change as you want!
+  //       // Create if not exists
+  //       const mediaPath = './downloaded-media/';
+
+  //       if (!fs.existsSync(mediaPath)) {
+  //         fs.mkdirSync(mediaPath);
+  //       }
+
+  //       // Get the file extension by mime-type
+  //       const extension = mime.extension(media.mimetype);
+        
+  //       // Filename: change as you want! 
+  //       // I will use the time for this example
+  //       // Why not use media.filename? Because the value is not certain exists
+  //       const filename = new Date().getTime();
+
+  //       const fullFilename = mediaPath + filename + '.' + extension;
+
+  //       // Save to
+
 client.initialize();
 
 // Socket IO
@@ -97,16 +132,10 @@ io.on('connection', function(socket) {
     socket.emit('message', 'Whatsapp is ready!');
   });
 
-  client.on('authenticated', (session) => {
+  client.on('authenticated', () => {
     socket.emit('authenticated', 'Whatsapp is authenticated!');
     socket.emit('message', 'Whatsapp is authenticated!');
-    console.log('AUTHENTICATED', session);
-    sessionCfg = session;
-    fs.writeFile(SESSION_FILE_PATH, JSON.stringify(session), function(err) {
-      if (err) {
-        console.error(err);
-      }
-    });
+    console.log('AUTHENTICATED');
   });
 
   client.on('auth_failure', function(session) {
@@ -115,10 +144,6 @@ io.on('connection', function(socket) {
 
   client.on('disconnected', (reason) => {
     socket.emit('message', 'Whatsapp is disconnected!');
-    fs.unlinkSync(SESSION_FILE_PATH, function(err) {
-        if(err) return console.log(err);
-        console.log('Session file deleted!');
-    });
     client.destroy();
     client.initialize();
   });
@@ -267,6 +292,49 @@ app.post('/send-group-message', [
       response: err
     });
   });
+});
+
+// Clearing message on spesific chat
+app.post('/clear-message', [
+  body('number').notEmpty(),
+], async (req, res) => {
+  const errors = validationResult(req).formatWith(({
+    msg
+  }) => {
+    return msg;
+  });
+
+  if (!errors.isEmpty()) {
+    return res.status(422).json({
+      status: false,
+      message: errors.mapped()
+    });
+  }
+
+  const number = phoneNumberFormatter(req.body.number);
+
+  const isRegisteredNumber = await checkRegisteredNumber(number);
+
+  if (!isRegisteredNumber) {
+    return res.status(422).json({
+      status: false,
+      message: 'The number is not registered'
+    });
+  }
+
+  const chat = await client.getChatById(number);
+  
+  chat.clearMessages().then(status => {
+    res.status(200).json({
+      status: true,
+      response: status
+    });
+  }).catch(err => {
+    res.status(500).json({
+      status: false,
+      response: err
+    });
+  })
 });
 
 server.listen(port, function() {
